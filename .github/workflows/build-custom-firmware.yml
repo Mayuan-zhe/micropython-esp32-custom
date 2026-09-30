@@ -60,10 +60,22 @@ jobs:
           MANIFEST=/opt/build/micropython/ports/esp32/boards/manifest.py
           echo "--- original manifest tail ---"
           tail -n 10 "$MANIFEST"
-          # Append freeze of ssd1306.py from extmod (only if not already present)
+          # ssd1306.py moved out of extmod into the micropython-lib submodule
+          # in recent MicroPython versions. Locate it dynamically so the
+          # freeze path always matches the actual tree layout.
           if ! grep -q "ssd1306" "$MANIFEST"; then
-            printf '\n# added by custom build: enable ssd1306 OLED driver\nfreeze("$(MPY_DIR)/extmod", "ssd1306.py")\n' >> "$MANIFEST"
-            echo "ssd1306 freeze appended"
+            SSD_FILE=$(find /opt/build/micropython/lib/micropython-lib -name "ssd1306.py" -path "*display*" | head -n1)
+            if [ -z "$SSD_FILE" ]; then
+              echo "ERROR: ssd1306.py not found in micropython-lib"
+              exit 1
+            fi
+            SSD_DIR=$(dirname "$SSD_FILE")
+            {
+              echo ""
+              echo "# added by custom build: enable ssd1306 OLED driver"
+              echo "freeze(\"$SSD_DIR\", \"ssd1306.py\")"
+            } >> "$MANIFEST"
+            echo "appended freeze($SSD_DIR, ssd1306.py)"
           else
             echo "ssd1306 already referenced, leaving manifest unchanged"
           fi
