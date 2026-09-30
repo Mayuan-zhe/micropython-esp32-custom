@@ -1,0 +1,115 @@
+name: Build Custom ESP32 MicroPython Firmware
+
+# Manual trigger only. No automatic triggers.
+on:
+  workflow_dispatch:
+    inputs:
+      micropython_version:
+        description: 'MicroPython tag to build'
+        required: true
+        default: 'v1.28.0'
+      board:
+        description: 'ESP32 board (ESP32_GENERIC for plain ESP32)'
+        required: true
+        default: 'ESP32_GENERIC'
+
+jobs:
+  build:
+    name: Build firmware
+    runs-on: ubuntu-latest
+    # Pre-built ESP-IDF image avoids installing the toolchain on every run.
+    container:
+      image: espressif/idf:v5.5.1
+      # Run as root so we can write to /opt without sudo dance.
+      options: --user root
+
+    steps:
+      - name: Checkout this repo (carries servo.py, hcsr04.py)
+        uses: actions/checkout@v4
+        with:
+          path: custom-repo
+
+      - name: Show environment
+        run: |
+          echo "=== uname ==="; uname -a
+          echo "=== id ==="; id
+          echo "=== idf.py location ==="; which idf.py || true
+          echo "=== ESP-IDF path ==="; echo "IDF_PATH=$IDF_PATH"
+          echo "=== python ==="; python --version || python3 --version
+          echo "=== git ==="; git --version
+
+      - name: Clone MicroPython ${{ inputs.micropython_version }}
+        run: |
+          mkdir -p /opt/build
+          cd /opt/build
+          git clone --depth 1 -b "${{ inputs.micropython_version }}" https://github.com/micropython/micropython.git
+          cd micropython
+          git submodule update --init --recursive --depth 1
+
+      - name: Place frozen modules (servo.py, hcsr04.py)
+        run: |
+          MP_MODS=/opt/build/micropython/ports/esp32/modules
+          mkdir -p "$MP_MODS"
+          cp -v "$GITHUB_WORKSPACE/custom-repo/modules/servo.py"  "$MP_MODS/servo.py"
+          cp -v "$GITHUB_WORKSPACE/custom-repo/modules/hcsr04.py" "$MP_MODS/hcsr04.py"
+          echo "--- modules dir ---"
+          ls -la "$MP_MODS" | grep -E 'servo|hcsr04'
+
+      - name: Patch board manifest to freeze ssd1306
+        run: |
+          MANIFEST=/opt/build/micropython/ports/esp32/boards/manifest.py
+          echo "--- original manifest tail ---"
+          tail -n 10 "$MANIFEST"
+          # Append freeze of ssd1306.py from extmod (only if not already present)
+          if ! grep -q "ssd1306" "$MANIFEST"; then
+            printf '\n# added by custom build: enable ssd1306 OLED driver\nfreeze("$(MPY_DIR)/extmod", "ssd1306.py")\n' >> "$MANIFEST"
+            echo "ssd1306 freeze appended"
+          else
+            echo "ssd1306 already referenced, leaving manifest unchanged"
+          fi
+          echo "--- patched manifest tail ---"
+          tail -n 10 "$MANIFEST"
+
+      - name: Build mpy-cross
+        run: |
+          cd /opt/build/micropython
+          make -C mpy-cross
+
+      - name: Source ESP-IDF env
+        run: |
+          # espressif/idf image ships IDF at $IDF_PATH with export.sh
+          # shellcheck disable=SC1091
+          source "$IDF_PATH/export.sh" || true
+          echo "IDF_PATH=$IDF_PATH" >> "$GITHUB_ENV"
+          which idf.py
+          idf.py --version || true
+
+      - name: Build ESP32 submodules
+        run: |
+          source "$IDF_PATH/export.sh" || true
+          cd /opt/build/micropython/ports/esp32
+          make submodules
+
+      - name: Build ESP32 firmware (${{ inputs.board }})
+        run: |
+          source "$IDF_PATH/export.sh" || true
+          cd /opt/build/micropython/ports/esp32
+          make BOARD="${{ inputs.board }}"
+
+      - name: Collect artifacts
+        run: |
+          BUILD_DIR=/opt/build/micropython/ports/esp32/build-${{ inputs.board }}
+          mkdir -p artifacts
+          cp -v "$BUILD_DIR/firmware.bin"      artifacts/firmware.bin
+          cp -v "$BUILD_DIR/bootloader.bin"   artifacts/bootloader.bin 2>/dev/null || true
+          cp -v "$BUILD_DIR/partitions.bin"   artifacts/partitions.bin 2>/dev/null || true
+          cp -v "$BUILD_DIR/micropython.bin"   artifacts/micropython.bin 2>/dev/null || true
+          ls -la artifacts
+
+      - name: Upload firmware artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: micropython-esp32-custom-${{ inputs.board }}-${{ inputs.micropython_version }}
+          path: artifacts/*
+          if-no-files-found: error
+          retention-days: 30
