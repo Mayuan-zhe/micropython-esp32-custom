@@ -75,25 +75,19 @@ jobs:
           cd /opt/build/micropython
           make -C mpy-cross
 
-      - name: Source ESP-IDF env
+      # GH Actions container jobs skip the image entrypoint, so export.sh
+      # never ran. Source it here and add a hard PATH fallback, then do all
+      # idf-dependent work in this same step so the env stays active.
+      - name: Build ESP32 submodules + firmware (${{ inputs.board }})
+        shell: bash
         run: |
-          # espressif/idf image ships IDF at $IDF_PATH with export.sh
-          # shellcheck disable=SC1091
-          source "$IDF_PATH/export.sh" || true
-          echo "IDF_PATH=$IDF_PATH" >> "$GITHUB_ENV"
+          . "$IDF_PATH/export.sh" || echo "WARN: export.sh returned non-zero, using PATH fallback"
+          export PATH="$IDF_PATH/tools:$PATH"
+          echo "=== idf check ==="
           which idf.py
-          idf.py --version || true
-
-      - name: Build ESP32 submodules
-        run: |
-          source "$IDF_PATH/export.sh" || true
+          idf.py --version
           cd /opt/build/micropython/ports/esp32
           make submodules
-
-      - name: Build ESP32 firmware (${{ inputs.board }})
-        run: |
-          source "$IDF_PATH/export.sh" || true
-          cd /opt/build/micropython/ports/esp32
           make BOARD="${{ inputs.board }}"
 
       - name: Collect artifacts
